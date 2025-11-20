@@ -4,10 +4,10 @@
  */
 
 // 判断当前运行环境
-// 在H5开发环境中使用代理路径，避免CORS问题
-let BASE_URL = 'https://eflfbpmxcpqg.sealoshzh.site/api'
+// 统一使用相对路径 /api，通过 nginx 代理到后端，避免 CORS 问题
+let BASE_URL = '/api'
 
-// 检测是否在H5开发环境中运行
+// 检测是否在开发环境中运行（使用 Vite 代理）
 try {
   // 检查是否在浏览器环境且是开发模式
   const isH5Dev = typeof window !== 'undefined' && 
@@ -17,12 +17,17 @@ try {
                     window.location?.hostname === '127.0.0.1')
   
   if (isH5Dev) {
-    // 在H5开发环境中使用代理路径，避免CORS问题
+    // 在H5开发环境中使用代理路径，Vite 会代理到后端
+    BASE_URL = '/api'
+  } else {
+    // 生产环境也使用 /api，通过 nginx 代理到后端
+    // nginx 已配置 /api 代理到 https://eflfbpmxcpqg.sealoshzh.site/api
     BASE_URL = '/api'
   }
 } catch (e) {
-  // 如果判断失败，使用默认的完整URL
-  console.warn('无法判断运行环境，使用完整URL:', e)
+  // 如果判断失败，使用默认的相对路径（通过 nginx 代理）
+  console.warn('无法判断运行环境，使用相对路径:', e)
+  BASE_URL = '/api'
 }
 
 /**
