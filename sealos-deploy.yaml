@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hospital-schedule-system
+  labels:
+    app: hospital-schedule-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hospital-schedule-system
+  template:
+    metadata:
+      labels:
+        app: hospital-schedule-system
+    spec:
+      containers:
+      - name: hospital-schedule
+        image: your-registry/hospital-schedule:latest  # 请替换为您的镜像地址
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        env:
+        - name: VITE_API_BASE_URL
+          value: "https://eflfbpmxcpqg.sealoshzh.site/api"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hospital-schedule-service
+  labels:
+    app: hospital-schedule-system
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  selector:
+    app: hospital-schedule-system
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hospital-schedule-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: your-app.cloud.sealos.io  # Sealos 会自动生成，或使用自定义域名
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hospital-schedule-service
+            port:
+              number: 80
+
