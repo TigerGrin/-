@@ -1,9 +1,5 @@
 name: Build and Push to GitHub Container Registry
 
-# 使用 GitHub Container Registry (ghcr.io)
-# 优点：免费、无需额外账号、国内可访问、无需配置 Secrets
-# 首次使用后，需要将镜像设置为公开（Public）
-
 on:
   push:
     branches: [ main, master ]
@@ -39,16 +35,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Get lowercase username
-        id: username
-        run: |
-          echo "username=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-      
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.username.outputs.username }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -72,13 +63,11 @@ jobs:
         if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
         run: |
           echo "✅ 镜像构建成功！"
-          echo "📦 镜像地址：${{ env.REGISTRY }}/${{ steps.username.outputs.username }}/${{ env.IMAGE_NAME }}"
+          echo "📦 镜像地址：${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}"
           echo "🏷️  标签：${{ steps.meta.outputs.tags }}"
           echo ""
           echo "在 Sealos 应用部署中使用以下镜像地址："
-          echo "${{ env.REGISTRY }}/${{ steps.username.outputs.username }}/${{ env.IMAGE_NAME }}:latest"
+          echo "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
           echo ""
-          echo "⚠️  首次使用需要将镜像设置为公开："
-          echo "访问：https://github.com/${{ github.repository_owner }}?tab=packages"
-          echo "找到 hospital-schedule-system 包 → Package settings → Change visibility → Make public"
+          echo "注意：首次使用需要将镜像设置为公开（Public）"
 
