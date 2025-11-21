@@ -566,14 +566,15 @@ export default {
       }
     },
     // 加载护士列表
-    async loadNurses(forceRefresh = false) {
+    async loadNurses(forceRefresh = false, skipSearch = false) {
       this.loading = true
       try {
         const params = {
           departmentId: this.departmentId,
           // 不传递level参数，始终加载所有护士，由前端进行过滤
           // level: this.currentFilter !== 'all' ? this.currentFilter : undefined,
-          keyword: this.searchKeyword || undefined,
+          // 如果 skipSearch 为 true，则不传递搜索关键词，获取完整列表
+          keyword: (skipSearch || !this.searchKeyword) ? undefined : this.searchKeyword,
           page: 1,
           pageSize: 1000 // 设置足够大的pageSize以获取所有护士数据
         }
@@ -854,7 +855,10 @@ export default {
         
         this.hideModal()
         // 重新加载列表和当日排班
-        await this.loadNurses()
+        // 编辑保存后，跳过搜索参数，重新加载完整列表
+        await this.loadNurses(true, true) // 强制刷新，跳过搜索，获取完整列表
+        // 清空搜索关键词，让用户看到完整列表
+        this.searchKeyword = ''
         await this.loadTodaySchedules()
       } catch (error) {
         console.error('保存护士失败:', error)
@@ -886,7 +890,8 @@ export default {
               
               // 延迟刷新列表，确保后端处理完成，同时强制刷新避免缓存
               setTimeout(async () => {
-                await this.loadNurses(true) // 强制刷新，添加时间戳避免缓存
+                await this.loadNurses(true, true) // 强制刷新，跳过搜索，获取完整列表
+                this.searchKeyword = '' // 清空搜索关键词
                 await this.loadTodaySchedules() // 同时刷新当日排班
               }, 500)
             } catch (error) {
