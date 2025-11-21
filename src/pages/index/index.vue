@@ -114,8 +114,10 @@ export default {
     this.loadStatistics()
   },
   methods: {
-    // 加载统计数据
-    async loadStatistics() {
+    // 加载统计数据（带重试机制）
+    async loadStatistics(retryCount = 0) {
+      const maxRetries = 2 // 最多重试2次
+      
       try {
         // 获取科室统计信息（默认科室D001）
         const result = await getDepartmentStatistics({ departmentId: 'D001' })
@@ -123,14 +125,32 @@ export default {
           // 更新统计卡片数据
           this.stats[0].value = String(result.totalNurses || 0)
           this.stats[1].value = String(result.weeklyShifts || 0)
+          console.log('✅ 统计数据加载成功:', result)
         }
       } catch (error) {
-        console.error('加载统计数据失败:', error)
-        // 503错误时，不显示toast（已在api.js中显示），保持默认值0
-        // 其他错误可能需要额外处理
-        if (error.message && error.message.includes('503')) {
-          console.warn('⚠️ 后端服务不可用，统计数据将显示为默认值。请确认后端服务已启动。')
+        console.error(`加载统计数据失败 (尝试 ${retryCount + 1}/${maxRetries + 1}):`, error)
+        
+        // 如果是网关错误且还有重试次数，则重试
+        if ((error.message && (error.message.includes('502') || error.message.includes('Bad Gateway'))) && retryCount < maxRetries) {
+          console.log(`⏳ ${retryCount + 1} 秒后重试加载统计数据...`)
+          setTimeout(() => {
+            this.loadStatistics(retryCount + 1)
+          }, (retryCount + 1) * 1000) // 递增延迟：1秒、2秒
+          return
         }
+        
+        // 根据错误类型提供不同的处理
+        if (error.message && (error.message.includes('502') || error.message.includes('Bad Gateway'))) {
+          console.warn('⚠️ 后端网关错误，统计数据将显示为默认值。这可能是临时问题。')
+        } else if (error.message && error.message.includes('503')) {
+          console.warn('⚠️ 后端服务不可用，统计数据将显示为默认值。请确认后端服务已启动。')
+        } else {
+          console.warn('⚠️ 统计数据加载失败，使用默认值。错误:', error.message)
+        }
+        
+        // 设置默认值，确保界面正常显示
+        this.stats[0].value = '0'
+        this.stats[1].value = '0'
       }
     },
     navigateTo(route) {
