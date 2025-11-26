@@ -16,6 +16,10 @@
         <view class="week-nav" @click="nextWeek">
           <text class="nav-icon">→</text>
         </view>
+        <view class="auto-schedule-btn" @click="openAutoScheduleModal">
+          <text class="auto-icon">🤖</text>
+          <text class="auto-text">自动排班</text>
+        </view>
         <view class="save-btn" @click="saveStoredLeave">
           <text class="save-icon">💾</text>
           <text class="save-text">保存存休</text>
@@ -148,6 +152,17 @@
           <view class="form-group" v-if="editingSchedule">
             <text class="form-label">班次：{{ getScheduleDisplayText(editingSchedule) }}</text>
           </view>
+          <!-- 特殊任务名称设置 -->
+          <view class="form-group" v-if="isSpecialTask">
+            <text class="form-label">任务名称</text>
+            <input 
+              type="text" 
+              v-model="specialTaskName" 
+              placeholder="请输入任务名称"
+              class="form-input"
+              maxlength="20"
+            />
+          </view>
           <!-- 备日班和备夜班的启用开关 -->
           <view class="form-group" v-if="isBackupShift">
             <text class="form-label">是否启用</text>
@@ -167,22 +182,22 @@
             <view class="switch-group">
               <view 
                 class="switch-item" 
-                :class="{ active: timePeriod === 'full' }"
-                @click="timePeriod = 'full'"
+                :class="{ active: timeRange === '整班' }"
+                @click="timeRange = '整班'"
               >
                 <text class="switch-text">整班</text>
               </view>
               <view 
                 class="switch-item" 
-                :class="{ active: timePeriod === 'morning' }"
-                @click="timePeriod = 'morning'"
+                :class="{ active: timeRange === '上午' }"
+                @click="timeRange = '上午'"
               >
                 <text class="switch-text">上午</text>
               </view>
               <view 
                 class="switch-item" 
-                :class="{ active: timePeriod === 'afternoon' }"
-                @click="timePeriod = 'afternoon'"
+                :class="{ active: timeRange === '下午' }"
+                @click="timeRange = '下午'"
               >
                 <text class="switch-text">下午</text>
               </view>
@@ -211,6 +226,72 @@
         </view>
       </view>
     </view>
+
+    <!-- 特殊任务名称设置弹窗 -->
+    <view class="modal-overlay" v-if="showSpecialTaskNameModal" @click="hideSpecialTaskNameModal">
+      <view class="modal-content hours-modal" @click.stop>
+        <view class="modal-header">
+          <text class="modal-title">设置特殊任务名称</text>
+          <view class="close-btn" @click="hideSpecialTaskNameModal">×</view>
+        </view>
+        <view class="modal-body">
+          <view class="form-group" v-if="editingSchedule">
+            <text class="form-label">护士：{{ getNurseName(editingSchedule.nurseId) }}</text>
+          </view>
+          <view class="form-group" v-if="editingSchedule">
+            <text class="form-label">日期：{{ editingSchedule.date }}</text>
+          </view>
+          <view class="form-group">
+            <text class="form-label">任务名称</text>
+            <input 
+              type="text" 
+              v-model="specialTaskName" 
+              placeholder="请输入任务名称"
+              class="form-input"
+              maxlength="20"
+            />
+          </view>
+        </view>
+        <view class="modal-footer">
+          <view class="btn btn-secondary" @click="hideSpecialTaskNameModal">取消</view>
+          <view class="btn btn-primary" @click="saveSpecialTaskName">保存</view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 自动排班弹窗 -->
+    <view class="modal-overlay" v-if="showAutoScheduleModal" @click="hideAutoScheduleModal">
+      <view class="modal-content auto-schedule-modal" @click.stop>
+        <view class="modal-header">
+          <text class="modal-title">自动排班</text>
+          <view class="close-btn" @click="hideAutoScheduleModal">×</view>
+        </view>
+        <view class="modal-body">
+          <view class="form-group">
+            <text class="form-label">排班规则</text>
+            <view class="rules-info">
+              <text class="rule-item">• 组长（夜班）：8个组长，6天一轮，每轮轮空2名</text>
+              <text class="rule-item">• N2、N3：6天一个夜班</text>
+              <text class="rule-item">• N1、N0：5天一个夜班</text>
+            </view>
+          </view>
+          <view class="form-group">
+            <text class="form-label">排班范围</text>
+            <text class="date-range">{{ weekStart }} 至 {{ weekEnd }}</text>
+          </view>
+          <view class="form-group">
+            <text class="form-label">操作说明</text>
+            <text class="warning-text">⚠️ 自动排班将覆盖当前周的夜班排班，请确认后操作</text>
+          </view>
+        </view>
+        <view class="modal-footer">
+          <view class="btn btn-secondary" @click="hideAutoScheduleModal">取消</view>
+          <view class="btn btn-primary" @click="executeAutoSchedule" :class="{ 'btn-disabled': autoScheduling }">
+            {{ autoScheduling ? '排班中...' : '开始自动排班' }}
+          </view>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
@@ -224,7 +305,9 @@ import {
   createSchedule, 
   updateSchedule,
   deleteSchedule, 
-  validateSchedule 
+  validateSchedule,
+  batchCreateSchedule,
+  batchDeleteSchedule
 } from '@/api/schedule'
 
 const LEGACY_SHIFT_NAME_VALUE_MAP = {
@@ -260,9 +343,13 @@ export default {
       editingSchedule: null,
       editingHours: 8,
       isBackupEnabled: false, // 备班是否启用
-      timePeriod: 'full', // 时间段选择：'full'(整班)、'morning'(上午) 或 'afternoon'(下午)
+      timeRange: '整班', // 时间段选择：'整班'、'上午' 或 '下午'
       weeklyStoredLeaveCalculated: {}, // 记录本周已计算过存休的护士及其存休变化 { nurseId: storedLeaveDays }
       doubleClickTimer: null, // 双击检测定时器
+      showAutoScheduleModal: false, // 显示自动排班弹窗
+      autoScheduling: false, // 正在自动排班
+      showSpecialTaskNameModal: false, // 显示特殊任务名称设置弹窗
+      specialTaskName: '', // 特殊任务名称
       // 状态/班次类型定义
       shiftTypes: [
         { value: 'rest', name: '休息' },
@@ -272,10 +359,11 @@ export default {
         { value: 'treatment_1_25', name: '治疗1.25' },
         { value: 'backup_day', name: '备日班' },
         { value: 'training', name: '院内培训' },
-        { value: 'day_team_leader', name: '责任组长(白班)' },
-        { value: 'day_duty_nurse', name: '责任护士(白班)' },
-        { value: 'day_office', name: '办公护士(白班)' },
-        { value: 'day_treatment', name: '治疗护士(白班)' },
+        { value: 'day_shift', name: '日班' },
+        { value: 'day_duty_nurse', name: '责*1.25' },
+        { value: 'day_office', name: '办公一' },
+        { value: 'day_treatment', name: '治疗' },
+        { value: 'special_task', name: '特殊任务' },
         { value: 'night_leader', name: '组长(夜班)' },
         { value: 'night_nurse', name: '护士(夜班)' },
         { value: 'backup_night', name: '备夜班' }
@@ -290,6 +378,14 @@ export default {
       }
       const shiftValue = this.editingSchedule.shiftValue || this.getScheduleShiftValue(this.editingSchedule)
       return shiftValue === 'backup_day' || shiftValue === 'backup_night'
+    },
+    // 判断当前编辑的排班是否是特殊任务
+    isSpecialTask() {
+      if (!this.editingSchedule) {
+        return false
+      }
+      const shiftValue = this.editingSchedule.shiftValue || this.getScheduleShiftValue(this.editingSchedule)
+      return shiftValue === 'special_task'
     },
     weekStart() {
       return this.formatDate(this.currentWeekStart)
@@ -454,21 +550,8 @@ export default {
         return schedule.hours
       }
       
-      // 如果没有手动设置，使用默认工时
-      if (!shiftValue) {
-        return 0
-      }
-      // 备日班和备夜班默认未启用，工时为0
-      if (shiftValue === 'backup_day' || shiftValue === 'backup_night') {
-        return 0
-      }
-      if (ZERO_HOUR_SHIFT_VALUES.has(shiftValue)) {
-        return 0
-      }
-      if (TWELVE_HOUR_SHIFT_VALUES.has(shiftValue)) {
-        return 12
-      }
-      return 8
+      // 如果没有手动设置，使用默认工时（调用 getDefaultHoursForShiftValue 方法）
+      return this.getDefaultHoursForShiftValue(shiftValue)
     },
     formatWeeklyHours(nurseId) {
       const hours = this.weeklyHoursMap[nurseId] || 0
@@ -523,17 +606,54 @@ export default {
         })
         
         if (result && result.list) {
-          this.schedules = result.list.map(item => ({
-            id: item._id || item.id,
-            nurseId: item.nurseId,
-            nurseName: item.nurseName,
-            date: item.date,
-            shiftType: item.shiftType,
-            shiftName: item.shiftName,
-            shiftValue: this.resolveShiftValue(item),
-            timePeriod: item.timePeriod || 'full', // 加载时添加时间段信息
-            hours: item.hours !== undefined && item.hours !== null ? item.hours : undefined
-          }))
+          console.log('📥 开始加载排班数据，总数:', result.list.length)
+          this.schedules = result.list.map(item => {
+            // 调试日志：检查后端返回的原始数据（特别是包含 hours 或 timeRange 的）
+            const hasCustomData = item.hours !== undefined || 
+                                 item.timeRange !== undefined || 
+                                 (item.timeRange !== null && item.timeRange !== '整班')
+            
+            if (hasCustomData) {
+              console.log('📋 后端返回的排班数据（包含自定义字段）:', {
+                id: item._id || item.id,
+                nurseId: item.nurseId,
+                date: item.date,
+                shiftName: item.shiftName,
+                hours: item.hours,
+                timeRange: item.timeRange,
+                hasTimeRange: 'timeRange' in item,
+                timeRangeType: typeof item.timeRange,
+                allKeys: Object.keys(item)
+              })
+            }
+            
+            const schedule = {
+              id: item._id || item.id,
+              nurseId: item.nurseId,
+              nurseName: item.nurseName,
+              date: item.date,
+              shiftType: item.shiftType,
+              shiftName: item.shiftName,
+              shiftValue: this.resolveShiftValue(item),
+              // 确保 timeRange 字段正确加载，如果后端没有返回，使用默认值
+              timeRange: (item.timeRange !== undefined && item.timeRange !== null && item.timeRange !== '') 
+                         ? item.timeRange 
+                         : '整班',
+              hours: item.hours !== undefined && item.hours !== null ? item.hours : undefined
+            }
+            
+            // 调试日志：检查加载后的数据（特别是非默认值的）
+            if (schedule.hours !== undefined || schedule.timeRange !== '整班') {
+              console.log(`✅ 加载排班: ${schedule.nurseId} ${schedule.date} ${schedule.shiftName} - 工时: ${schedule.hours || '未设置'}h, 时间段: ${schedule.timeRange}`)
+            }
+            
+            return schedule
+          })
+          
+          // 统计加载的数据
+          const withHours = this.schedules.filter(s => s.hours !== undefined).length
+          const withCustomTimeRange = this.schedules.filter(s => s.timeRange !== '整班').length
+          console.log(`📊 加载完成统计: 总数=${this.schedules.length}, 有工时=${withHours}, 有自定义时间段=${withCustomTimeRange}`)
           
           // 切换周时，清空本周已计算的存休记录
           this.weeklyStoredLeaveCalculated = {}
@@ -597,10 +717,11 @@ export default {
         'treatment_1_25': 'day_treatment',
         'backup_day': 'backup_day',
         'training': 'training', // 培训状态
-        'day_team_leader': 'day_team_leader',
+        'day_shift': 'day_shift', // 日班
         'day_duty_nurse': 'day_duty_nurse',
         'day_office': 'day_office',
         'day_treatment': 'day_treatment',
+        'special_task': 'special_task', // 特殊任务
         'night_leader': 'night_leader',
         'night_nurse': 'night_nurse',
         'backup_night': 'backup_night'
@@ -662,13 +783,17 @@ export default {
 
       // 直接创建排班，不再删除已有排班
       try {
+        // 特殊任务默认工时为8h
+        const defaultHours = shift.value === 'special_task' ? 8 : undefined
+        
         const result = await createSchedule({
           nurseId,
           departmentId: this.departmentId,
           date: dateStr,
           shiftType,
           shiftName: shift.name,
-          timePeriod: this.timePeriod // 添加上下午信息
+          timeRange: this.timeRange, // 添加上下午信息
+          hours: defaultHours // 特殊任务默认8h
         })
 
         if (result) {
@@ -681,9 +806,24 @@ export default {
             shiftType,
             shiftName: shift.name,
             shiftValue: shift.value,
-            timePeriod: this.timePeriod, // 保存上下午信息
-            hours: result.hours !== undefined && result.hours !== null ? result.hours : undefined
+            timeRange: result.timeRange || this.timeRange, // 保存上下午信息
+            hours: result.hours !== undefined && result.hours !== null ? result.hours : (shift.value === 'special_task' ? 8 : undefined)
           })
+          
+          // 如果是特殊任务，创建后立即弹出工时设置弹窗（可以设置名称、时间段和工时）
+          if (shift.value === 'special_task') {
+            // 延迟一下，确保排班已创建
+            setTimeout(() => {
+              const newSchedule = this.schedules.find(s => s.id === (result.id || result._id))
+              if (newSchedule) {
+                this.editingSchedule = newSchedule
+                this.specialTaskName = '特殊任务'
+                this.timeRange = this.timeRange || '整班'
+                this.editingHours = 8 // 默认8小时
+                this.showHoursModal = true
+              }
+            }, 100)
+          }
           
           // 检查该护士是否是带班老师，如果是，自动为实习护士和进修护士排班
           await this.autoScheduleForStudents(nurseId, dateStr, shiftType, shift.name, shift.value)
@@ -737,13 +877,13 @@ export default {
         text = schedule.shiftName || schedule.shiftType || ''
       }
       // 添加时间段标识（整班不显示前缀）
-      if (schedule.timePeriod) {
-        if (schedule.timePeriod === 'morning') {
+      if (schedule.timeRange) {
+        if (schedule.timeRange === '上午') {
           text = `上午${text}`
-        } else if (schedule.timePeriod === 'afternoon') {
+        } else if (schedule.timeRange === '下午') {
           text = `下午${text}`
         }
-        // 'full' (整班) 不添加前缀
+        // '整班' 不添加前缀
       }
       return text
     },
@@ -767,6 +907,11 @@ export default {
         return 0
       }
       
+      // 备日班和备夜班默认未启用，工时为0
+      if (shiftValue === 'backup_day' || shiftValue === 'backup_night') {
+        return 0
+      }
+      
       // 包含"*1.5"的班默认12小时（如"夜*1.5"、"责*1.5"等）
       const shiftStr = String(shiftValue)
       if (shiftStr.includes('1.5') || shiftStr.includes('*1.5') || 
@@ -775,9 +920,9 @@ export default {
         return 12
       }
       
-      // 包含"*1.25"的班默认9小时（如"治疗1.25"等）
+      // 包含"*1.25"的班默认9小时（如"责*1.25"、"治疗1.25"等）
       if (shiftStr.includes('1.25') || shiftStr.includes('*1.25') || 
-          shiftValue === 'treatment_1_25') {
+          shiftValue === 'treatment_1_25' || shiftValue === 'day_duty_nurse') {
         return 9
       }
       
@@ -798,10 +943,17 @@ export default {
       this.editingSchedule = schedule
       
       // 设置时间段
-      this.timePeriod = schedule.timePeriod || 'full'
+      this.timeRange = schedule.timeRange || '整班'
+      
+      // 判断是否是特殊任务
+      const shiftValue = schedule.shiftValue || this.getScheduleShiftValue(schedule)
+      if (shiftValue === 'special_task') {
+        // 特殊任务：设置名称
+        this.specialTaskName = schedule.shiftName || '特殊任务'
+      }
+      
       
       // 判断是否是备日班或备夜班
-      const shiftValue = schedule.shiftValue || this.getScheduleShiftValue(schedule)
       const isBackup = shiftValue === 'backup_day' || shiftValue === 'backup_night'
       
       if (isBackup) {
@@ -859,17 +1011,82 @@ export default {
       this.editingSchedule = null
       this.editingHours = 8
       this.isBackupEnabled = false
-      this.timePeriod = 'full'
+      this.timeRange = '整班'
+      this.specialTaskName = ''
+    },
+    // 保存特殊任务名称
+    async saveSpecialTaskName() {
+      if (!this.editingSchedule) {
+        return
+      }
+      
+      if (!this.specialTaskName || this.specialTaskName.trim() === '') {
+        uni.showToast({
+          title: '请输入任务名称',
+          icon: 'none'
+        })
+        return
+      }
+      
+      try {
+        // 更新排班名称
+        await updateSchedule(this.editingSchedule.id, {
+          shiftName: this.specialTaskName.trim()
+        })
+        
+        // 更新本地排班数据
+        const scheduleIndex = this.schedules.findIndex(s => s.id === this.editingSchedule.id)
+        if (scheduleIndex !== -1) {
+          this.schedules[scheduleIndex].shiftName = this.specialTaskName.trim()
+        }
+        
+        uni.showToast({
+          title: '设置成功',
+          icon: 'success'
+        })
+        
+        this.hideSpecialTaskNameModal()
+      } catch (error) {
+        console.error('保存任务名称失败:', error)
+        uni.showToast({
+          title: error.message || '保存失败',
+          icon: 'none'
+        })
+      }
+    },
+    // 关闭特殊任务名称设置弹窗
+    hideSpecialTaskNameModal() {
+      this.showSpecialTaskNameModal = false
+      this.editingSchedule = null
+      this.specialTaskName = ''
     },
     // 保存工时
     async saveHours() {
-      if (!this.editingSchedule) {
+      // 检查 editingSchedule 是否存在且有 id
+      if (!this.editingSchedule || !this.editingSchedule.id) {
+        uni.showToast({
+          title: '排班数据不存在',
+          icon: 'none'
+        })
+        this.hideHoursModal()
         return
       }
       
       // 判断是否是备日班或备夜班
       const shiftValue = this.editingSchedule.shiftValue || this.getScheduleShiftValue(this.editingSchedule)
       const isBackup = shiftValue === 'backup_day' || shiftValue === 'backup_night'
+      const isSpecialTask = shiftValue === 'special_task'
+      
+      // 特殊任务名称验证
+      if (isSpecialTask) {
+        if (!this.specialTaskName || this.specialTaskName.trim() === '') {
+          uni.showToast({
+            title: '请输入任务名称',
+            icon: 'none'
+          })
+          return
+        }
+      }
       
       // 如果是备班且未启用，工时为0
       let finalHours = 0
@@ -898,17 +1115,87 @@ export default {
       }
       
       try {
-        // 更新排班工时和上下午
-        await updateSchedule(this.editingSchedule.id, {
+        // 判断是否是特殊任务（editingSchedule 已在方法开始处检查）
+        const shiftValue = this.editingSchedule.shiftValue || this.getScheduleShiftValue(this.editingSchedule)
+        const isSpecialTask = shiftValue === 'special_task'
+        
+        // 构建更新数据
+        const updateData = {
           hours: finalHours,
-          timePeriod: this.timePeriod
+          timeRange: this.timeRange
+        }
+        
+        // 如果是特殊任务，同时更新名称
+        if (isSpecialTask && this.specialTaskName && this.specialTaskName.trim() !== '') {
+          updateData.shiftName = this.specialTaskName.trim()
+        }
+        
+        // 更新排班工时、时间段和名称（如果是特殊任务）
+        console.log('📤 发送更新请求:', {
+          scheduleId: this.editingSchedule.id,
+          updateData
+        })
+        const updateResult = await updateSchedule(this.editingSchedule.id, updateData)
+        
+        // 详细检查后端返回的数据
+        const resultData = updateResult?.data || updateResult
+        const allResultKeys = updateResult ? Object.keys(updateResult) : []
+        const allDataKeys = resultData ? Object.keys(resultData) : []
+        
+        console.log('💾 保存排班设置 - 后端返回分析:', {
+          scheduleId: this.editingSchedule.id,
+          updateData,
+          '发送的timeRange': updateData.timeRange,
+          '发送的hours': updateData.hours,
+          'result的所有字段': allResultKeys,
+          'resultData的所有字段': allDataKeys,
+          'result完整对象': updateResult,
+          'resultData完整对象': resultData,
+          'result.timeRange': updateResult?.timeRange,
+          'resultData.timeRange': resultData?.timeRange,
+          'result.data.timeRange': updateResult?.data?.timeRange,
+          '是否有timeRange字段': (updateResult?.timeRange !== undefined) || 
+                                 (resultData?.timeRange !== undefined) ||
+                                 (updateResult?.data?.timeRange !== undefined),
+          '⚠️ 问题诊断': resultData && !resultData.timeRange 
+                         ? '后端返回了数据，但没有timeRange字段！需要检查后端代码。' 
+                         : '正常'
         })
         
-        // 更新本地排班数据
+        // 更新本地排班数据 - 使用用户设置的值（确保立即生效）
         const scheduleIndex = this.schedules.findIndex(s => s.id === this.editingSchedule.id)
         if (scheduleIndex !== -1) {
+          // 直接使用用户设置的值，确保立即生效
           this.schedules[scheduleIndex].hours = finalHours
-          this.schedules[scheduleIndex].timePeriod = this.timePeriod
+          this.schedules[scheduleIndex].timeRange = this.timeRange
+          if (isSpecialTask && this.specialTaskName && this.specialTaskName.trim() !== '') {
+            this.schedules[scheduleIndex].shiftName = this.specialTaskName.trim()
+          }
+          
+          // 检查后端返回的数据（可能直接返回对象，也可能在 data 字段中）
+          const updatedData = updateResult?.data || updateResult
+          if (updatedData && typeof updatedData === 'object') {
+            // 如果后端返回了 timeRange，验证是否与用户设置一致
+            if (updatedData.timeRange !== undefined && updatedData.timeRange === this.timeRange) {
+              this.schedules[scheduleIndex].timeRange = updatedData.timeRange
+              console.log('✅ 后端返回的 timeRange 与用户设置一致:', updatedData.timeRange)
+            }
+            // 如果后端返回了 hours，验证是否与用户设置一致
+            if (updatedData.hours !== undefined && updatedData.hours !== null && updatedData.hours === finalHours) {
+              this.schedules[scheduleIndex].hours = updatedData.hours
+            }
+            // 如果后端返回了 shiftName（特殊任务）
+            if (updatedData.shiftName && (!isSpecialTask || updatedData.shiftName === this.specialTaskName.trim())) {
+              this.schedules[scheduleIndex].shiftName = updatedData.shiftName
+            }
+          }
+          
+          console.log('✅ 已更新本地排班数据:', {
+            id: this.schedules[scheduleIndex].id,
+            hours: this.schedules[scheduleIndex].hours,
+            timeRange: this.schedules[scheduleIndex].timeRange,
+            shiftName: this.schedules[scheduleIndex].shiftName
+          })
         }
         
         // 不再自动更新存休，需要点击保存按钮统一更新
@@ -919,6 +1206,9 @@ export default {
         })
         
         this.hideHoursModal()
+        
+        // 不再立即重新加载，避免覆盖刚设置的值
+        // 本地数据已经更新，切换周或手动刷新时会重新加载
       } catch (error) {
         console.error('保存设置失败:', error)
         uni.showToast({
@@ -1257,7 +1547,8 @@ export default {
               departmentId: this.departmentId,
               date: dateStr,
               shiftType,
-              shiftName
+              shiftName,
+              timeRange: '整班' // 学生排班默认整班
             })
 
             if (result) {
@@ -1270,7 +1561,7 @@ export default {
                 shiftType,
                 shiftName,
                 shiftValue: originalShiftValue,
-                timePeriod: result.timePeriod || 'full', // 学生排班默认整班
+                timeRange: result.timeRange || '整班', // 学生排班默认整班
                 hours: result.hours !== undefined && result.hours !== null ? result.hours : undefined
               })
               console.log(`✅ 已为学生 ${student.name} 自动排班`)
@@ -1304,6 +1595,239 @@ export default {
       } catch (error) {
         console.error('自动排班功能出错:', error)
         // 静默处理错误，不影响主流程
+      }
+    },
+    // 显示自动排班弹窗
+    openAutoScheduleModal() {
+      console.log('打开自动排班弹窗')
+      this.showAutoScheduleModal = true
+      console.log('showAutoScheduleModal:', this.showAutoScheduleModal)
+    },
+    // 隐藏自动排班弹窗
+    hideAutoScheduleModal() {
+      this.showAutoScheduleModal = false
+    },
+    // 执行自动排班
+    async executeAutoSchedule() {
+      if (this.autoScheduling) return
+      
+      this.autoScheduling = true
+      
+      try {
+        uni.showLoading({
+          title: '正在自动排班...',
+          mask: true
+        })
+        
+        // 1. 检查护士数据是否加载
+        if (!this.nurses || this.nurses.length === 0) {
+          uni.showToast({
+            title: '请先加载护士数据',
+            icon: 'none'
+          })
+          return
+        }
+        
+        // 2. 获取当前周的日期列表
+        const weekDays = this.weekDays.map(day => day.dateStr)
+        console.log('📅 当前周日期:', weekDays)
+        
+        // 3. 获取所有护士（按级别分类）
+        // 注意：组长可能是N4或N3级别，且isTeamLeader为true
+        const teamLeaders = this.nurses.filter(n => {
+          const isLeader = n.isTeamLeader === true || n.isTeamLeader === 'true'
+          const isN4OrN3 = n.level === 'N4' || n.level === 'N3'
+          return isLeader && isN4OrN3
+        })
+        
+        // N2、N3护士（排除组长）
+        const n2n3Nurses = this.nurses.filter(n => {
+          const isLeader = n.isTeamLeader === true || n.isTeamLeader === 'true'
+          const isN2OrN3 = n.level === 'N2' || n.level === 'N3'
+          return !isLeader && isN2OrN3
+        })
+        
+        // N1、N0护士
+        const n1n0Nurses = this.nurses.filter(n => {
+          const isLeader = n.isTeamLeader === true || n.isTeamLeader === 'true'
+          const isN1OrN0 = n.level === 'N1' || n.level === 'N0'
+          return !isLeader && isN1OrN0
+        })
+        
+        console.log('📊 护士分类:', {
+          teamLeaders: teamLeaders.length,
+          n2n3: n2n3Nurses.length,
+          n1n0: n1n0Nurses.length,
+          totalNurses: this.nurses.length
+        })
+        console.log('📋 组长列表:', teamLeaders.map(n => ({ id: n.id, name: n.name, level: n.level, isTeamLeader: n.isTeamLeader })))
+        console.log('📋 N2/N3列表:', n2n3Nurses.map(n => ({ id: n.id, name: n.name, level: n.level })))
+        console.log('📋 N1/N0列表:', n1n0Nurses.map(n => ({ id: n.id, name: n.name, level: n.level })))
+        
+        // 4. 获取当前周的现有夜班排班（用于删除）
+        const existingNightSchedules = this.schedules.filter(s => {
+          return weekDays.includes(s.date) && 
+                 (s.shiftType === 'night_leader' || s.shiftType === 'night_nurse')
+        })
+        
+        // 5. 删除现有夜班排班
+        if (existingNightSchedules.length > 0) {
+          const scheduleIds = existingNightSchedules.map(s => s.id).filter(id => id)
+          if (scheduleIds.length > 0) {
+            try {
+              await batchDeleteSchedule({ scheduleIds })
+              console.log(`🗑️ 已删除 ${scheduleIds.length} 个现有夜班排班`)
+            } catch (error) {
+              console.warn('删除现有排班失败，继续执行:', error)
+            }
+          }
+        }
+        
+        // 6. 生成新的排班
+        const newSchedules = []
+        
+        // 6.1 组长夜班排班（8个组长，6天一轮，每轮轮空2名）
+        // 规则：每6天为一个周期，周期内6个组长上夜班，2个轮空
+        // 一周7天，每天都需要一个组长上夜班
+        if (teamLeaders.length >= 6) {
+          const leaderCycle = 6 // 6天一轮
+          const activeLeadersPerCycle = 6 // 每轮6个组长上夜班
+          
+          // 按工号排序，确保轮转顺序稳定
+          const sortedLeaders = [...teamLeaders].sort((a, b) => a.id.localeCompare(b.id))
+          
+          weekDays.forEach((dateStr, dayIndex) => {
+            // 计算当前是第几轮的第几天（0-5，第6天是周日）
+            const cycleDay = dayIndex % leaderCycle
+            
+            // 计算当前是第几轮（从0开始）
+            const cycleNumber = Math.floor(dayIndex / leaderCycle)
+            
+            // 每6天一个周期，周期内6个组长上夜班
+            // 计算应该上夜班的组长索引（8个组长中选6个，轮转）
+            // 使用模运算确保在8个组长中循环
+            const baseIndex = (cycleNumber * activeLeadersPerCycle + cycleDay) % sortedLeaders.length
+            const leader = sortedLeaders[baseIndex]
+            
+            newSchedules.push({
+              nurseId: leader.id,
+              departmentId: this.departmentId,
+              date: dateStr,
+              shiftType: 'night_leader',
+              shiftName: '组长(夜班)',
+              hours: 12
+            })
+          })
+        }
+        
+        // 6.2 N2、N3护士夜班排班（6天一个夜班）
+        if (n2n3Nurses.length > 0) {
+          const nightCycle = 6 // 6天一个夜班
+          const sortedNurses = [...n2n3Nurses].sort((a, b) => a.id.localeCompare(b.id))
+          
+          sortedNurses.forEach((nurse, nurseIndex) => {
+            // 计算该护士应该上夜班的日子
+            const baseDay = nurseIndex % nightCycle
+            weekDays.forEach((dateStr, dayIndex) => {
+              if (dayIndex % nightCycle === baseDay) {
+                newSchedules.push({
+                  nurseId: nurse.id,
+                  departmentId: this.departmentId,
+                  date: dateStr,
+                  shiftType: 'night_nurse',
+                  shiftName: '护士(夜班)',
+                  hours: 12
+                })
+              }
+            })
+          })
+        }
+        
+        // 6.3 N1、N0护士夜班排班（5天一个夜班）
+        if (n1n0Nurses.length > 0) {
+          const nightCycle = 5 // 5天一个夜班
+          const sortedNurses = [...n1n0Nurses].sort((a, b) => a.id.localeCompare(b.id))
+          
+          sortedNurses.forEach((nurse, nurseIndex) => {
+            // 计算该护士应该上夜班的日子
+            const baseDay = nurseIndex % nightCycle
+            weekDays.forEach((dateStr, dayIndex) => {
+              if (dayIndex % nightCycle === baseDay) {
+                newSchedules.push({
+                  nurseId: nurse.id,
+                  departmentId: this.departmentId,
+                  date: dateStr,
+                  shiftType: 'night_nurse',
+                  shiftName: '护士(夜班)',
+                  hours: 12
+                })
+              }
+            })
+          })
+        }
+        
+        console.log(`📅 生成 ${newSchedules.length} 个夜班排班`)
+        if (newSchedules.length > 0) {
+          console.log('📋 排班详情（前10个）:', newSchedules.slice(0, 10))
+        }
+        
+        // 7. 批量创建排班
+        if (newSchedules.length > 0) {
+          try {
+            const result = await batchCreateSchedule({
+              departmentId: this.departmentId,
+              schedules: newSchedules
+            })
+            
+            console.log('📦 批量创建排班响应:', result)
+            
+            if (result && result.list && result.list.length > 0) {
+              console.log(`✅ 成功创建 ${result.list.length} 个排班`)
+              
+              // 8. 重新加载排班数据
+              await this.loadSchedules()
+              
+              uni.showToast({
+                title: `自动排班完成，共生成 ${result.list.length} 个夜班`,
+                icon: 'success',
+                duration: 3000
+              })
+            } else {
+              console.warn('⚠️ 批量创建返回空结果:', result)
+              uni.showToast({
+                title: '排班创建失败，请查看控制台',
+                icon: 'none',
+                duration: 3000
+              })
+            }
+          } catch (error) {
+            console.error('❌ 批量创建排班失败:', error)
+            uni.showToast({
+              title: error.message || '排班创建失败',
+              icon: 'none',
+              duration: 3000
+            })
+          }
+        } else {
+          console.warn('⚠️ 没有生成任何排班')
+          uni.showToast({
+            title: '没有可排班的护士，请检查护士数据',
+            icon: 'none',
+            duration: 3000
+          })
+        }
+        
+      } catch (error) {
+        console.error('自动排班失败:', error)
+        uni.showToast({
+          title: error.message || '自动排班失败',
+          icon: 'none',
+          duration: 3000
+        })
+      } finally {
+        uni.hideLoading()
+        this.autoScheduling = false
+        this.hideAutoScheduleModal()
       }
     },
     // 导出Excel
@@ -1631,6 +2155,32 @@ export default {
   font-size: 24rpx;
 }
 
+.auto-schedule-btn {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  padding: 12rpx 24rpx;
+  background-color: #ff9800;
+  color: #ffffff;
+  border-radius: 8rpx;
+  cursor: pointer;
+  margin-left: 20rpx;
+  transition: all 0.2s;
+}
+
+.auto-schedule-btn:active {
+  background-color: #f57c00;
+  transform: scale(0.95);
+}
+
+.auto-icon {
+  font-size: 24rpx;
+}
+
+.auto-text {
+  font-size: 24rpx;
+}
+
 .shift-panel {
   background-color: #ffffff;
   padding: 20rpx;
@@ -1888,15 +2438,50 @@ export default {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 10000;
 }
 
-.hours-modal {
+.hours-modal,
+.auto-schedule-modal {
   background-color: #ffffff;
   border-radius: 20rpx;
   width: 90%;
   max-width: 600rpx;
   overflow: hidden;
+}
+
+.rules-info {
+  margin-top: 10rpx;
+  padding: 20rpx;
+  background-color: #f5f5f5;
+  border-radius: 8rpx;
+}
+
+.rule-item {
+  display: block;
+  font-size: 26rpx;
+  color: #666666;
+  line-height: 1.8;
+  margin-bottom: 8rpx;
+}
+
+.date-range {
+  font-size: 28rpx;
+  color: #333333;
+  font-weight: 500;
+  margin-top: 10rpx;
+}
+
+.warning-text {
+  font-size: 24rpx;
+  color: #ff9800;
+  line-height: 1.6;
+  margin-top: 10rpx;
+}
+
+.btn-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .modal-header {

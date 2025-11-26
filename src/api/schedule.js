@@ -24,7 +24,7 @@ export function getScheduleList(params = {}) {
  * @param {String} data.date 排班日期 YYYY-MM-DD
  * @param {String} data.shiftType 班次类型
  * @param {String} data.shiftName 班次名称（可选）
- * @param {String} data.timePeriod 时间段（可选）：'full'(整班)、'morning'(上午)、'afternoon'(下午)
+ * @param {String} data.timeRange 时间段（可选）：'整班'、'上午'、'下午'
  * @param {Number} data.hours 工时（可选，小时数）
  */
 export function createSchedule(data) {
@@ -49,7 +49,7 @@ export function batchCreateSchedule(data) {
  * @param {String} [data.date] 排班日期 YYYY-MM-DD
  * @param {String} [data.shiftType] 班次类型
  * @param {String} [data.shiftName] 班次名称
- * @param {String} [data.timePeriod] 时间段：'full'(整班)、'morning'(上午)、'afternoon'(下午)
+ * @param {String} [data.timeRange] 时间段：'整班'、'上午'、'下午'
  * @param {Number} [data.hours] 工时（小时数）
  */
 export function updateSchedule(scheduleId, data) {
@@ -130,6 +130,23 @@ export function batchDeleteSchedule(data) {
   return del('/schedule/batch', data)
 }
 
+/**
+ * 自动排班生成
+ * @param {Object} data 自动排班参数
+ * @param {String} data.departmentId 科室ID
+ * @param {String} data.startDate 开始日期 YYYY-MM-DD
+ * @param {String} data.endDate 结束日期 YYYY-MM-DD
+ * @param {Object} data.rules 排班规则
+ * @param {Number} data.rules.teamLeaderCount 组长总数
+ * @param {Number} data.rules.teamLeaderCycle 组长夜班周期（天）
+ * @param {Number} data.rules.teamLeaderRest 组长每轮轮空人数
+ * @param {Number} data.rules.n2n3NightCycle N2、N3夜班周期（天）
+ * @param {Number} data.rules.n1n0NightCycle N1、N0夜班周期（天）
+ */
+export function autoGenerateSchedule(data) {
+  return post('/schedule/auto-generate', data)
+}
+
 export default {
   getScheduleList,
   createSchedule,
@@ -141,6 +158,7 @@ export default {
   getScheduleCalendar,
   getNurseScheduleCalendar,
   batchUpdateSchedule,
-  batchDeleteSchedule
+  batchDeleteSchedule,
+  autoGenerateSchedule
 }
 
