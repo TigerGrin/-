@@ -737,6 +737,91 @@ export default {
       // 如果已有排班，也跳过验证（因为验证可能会阻止同一天多个排班）
       const skipValidation = ['rest', 'compensatory', 'half_compensatory', 'training'].includes(shift.value) || hasExistingSchedule
 
+      // 如果是夜班，检查前1-2天是否有夜班（如果前1-2天有夜班，后续应该已经自动排了休息，不应该再排夜班）
+      if ((shift.value === 'night_nurse' || shift.value === 'night_leader') && !skipValidation) {
+        const scheduleDate = new Date(dateStr)
+        
+        // 检查前1天和前2天是否有夜班
+        const checkDates = []
+        for (let i = 1; i <= 2; i++) {
+          const checkDate = new Date(scheduleDate)
+          checkDate.setDate(scheduleDate.getDate() - i)
+          checkDates.push(this.formatDate(checkDate))
+        }
+        
+        console.log(`🔍 检查夜班排班前是否有夜班: 当前日期=${dateStr}, 检查日期=${checkDates.join('、')}`)
+        
+        // 加载包含检查日期范围的排班数据
+        const earliestCheckDate = checkDates[checkDates.length - 1] // 最早的那个日期
+        const checkDateStart = this.getWeekStart(new Date(earliestCheckDate))
+        const checkDateEnd = new Date(scheduleDate)
+        checkDateEnd.setDate(checkDateEnd.getDate() + 1) // 包含当天
+        
+        const checkStartStr = this.formatDate(checkDateStart)
+        const checkEndStr = this.formatDate(checkDateEnd)
+        
+        try {
+          // 加载检查日期范围的排班数据
+          let checkSchedules = []
+          
+          // 先检查当前周的排班数据
+          const weekDateSet = new Set(this.weekDays.map(day => day.dateStr))
+          checkDates.forEach(date => {
+            if (weekDateSet.has(date)) {
+              const existing = this.getSchedulesForCell(nurseId, date)
+              checkSchedules.push(...existing)
+            }
+          })
+          
+          // 如果检查日期不在当前周，需要加载该周的排班数据
+          const needLoadDates = checkDates.filter(date => !weekDateSet.has(date))
+          if (needLoadDates.length > 0) {
+            const loadResult = await getScheduleList({
+              departmentId: this.departmentId,
+              startDate: checkStartStr,
+              endDate: checkEndStr
+            })
+            
+            if (loadResult && loadResult.list) {
+              checkSchedules.push(...loadResult.list.filter(s => 
+                s.nurseId === nurseId && 
+                checkDates.includes(s.date) &&
+                (s.shiftType === 'night_nurse' || s.shiftType === 'night_leader')
+              ))
+            }
+          }
+          
+          // 检查前1-2天是否有夜班
+          const hasRecentNightShift = checkSchedules.some(schedule => {
+            const scheduleShiftValue = this.getScheduleShiftValue(schedule)
+            return checkDates.includes(schedule.date) && 
+                   (scheduleShiftValue === 'night_nurse' || scheduleShiftValue === 'night_leader')
+          })
+          
+          if (hasRecentNightShift) {
+            const recentNightShift = checkSchedules.find(s => 
+              checkDates.includes(s.date) && 
+              (this.getScheduleShiftValue(s) === 'night_nurse' || this.getScheduleShiftValue(s) === 'night_leader')
+            )
+            const recentDate = recentNightShift ? recentNightShift.date : '未知'
+            
+            console.warn(`⚠️ 该护士在 ${recentDate} 有夜班，${dateStr} 不应该再排夜班（应该已经自动排了休息）`)
+            
+            uni.showModal({
+              title: '无法排夜班',
+              content: `该护士在 ${recentDate} 已有夜班，${dateStr} 不应该再排夜班（夜班后应该已经自动排了休息）。`,
+              showCancel: false
+            })
+            return
+          }
+          
+          console.log(`✅ 检查通过：前1-2天没有夜班，可以排夜班`)
+        } catch (error) {
+          console.error('检查前1-2天夜班失败:', error)
+          // 检查失败不影响继续创建排班（容错处理）
+        }
+      }
+
       if (shift.value === 'rest') {
         const weekDateSet = new Set(this.weekDays.map(day => day.dateStr))
         const restCount = this.schedules.filter(schedule => 
@@ -827,6 +912,12 @@ export default {
           
           // 检查该护士是否是带班老师，如果是，自动为实习护士和进修护士排班
           await this.autoScheduleForStudents(nurseId, dateStr, shiftType, shift.name, shift.value)
+          
+          // 如果是夜班，自动为后面两天排休息
+          if (shift.value === 'night_nurse' || shift.value === 'night_leader') {
+            console.log(`🔔 检测到夜班排班，准备自动排休息: 护士=${nurseId}, 日期=${dateStr}, 班次=${shift.value}`)
+            await this.autoScheduleRestAfterNightShift(nurseId, dateStr)
+          }
           
           // 不再自动更新存休，需要点击保存按钮统一更新
           
@@ -1597,6 +1688,252 @@ export default {
         // 静默处理错误，不影响主流程
       }
     },
+    // 夜班后自动排休息（排完夜班后，后面两天自动排休息，支持跨周）
+    async autoScheduleRestAfterNightShift(nurseId, nightShiftDateStr) {
+      try {
+        // 计算后面两天的日期（支持跨周）
+        const nightShiftDate = new Date(nightShiftDateStr)
+        const nextDay1 = new Date(nightShiftDate)
+        nextDay1.setDate(nightShiftDate.getDate() + 1)
+        const nextDay1Str = this.formatDate(nextDay1)
+        
+        const nextDay2 = new Date(nightShiftDate)
+        nextDay2.setDate(nightShiftDate.getDate() + 2)
+        const nextDay2Str = this.formatDate(nextDay2)
+        
+        // 支持跨周排休息，不再限制在当前周内
+        const restDays = [nextDay1Str, nextDay2Str]
+        
+        console.log(`🌙 夜班后自动排休息：`)
+        console.log(`   - 护士ID: ${nurseId}, 护士姓名: ${this.getNurseName(nurseId)}`)
+        console.log(`   - 夜班日期: ${nightShiftDateStr}`)
+        console.log(`   - 后一天: ${restDays[0]}`)
+        console.log(`   - 后两天: ${restDays[1]}`)
+        console.log(`   - 支持跨周排休息`)
+        
+        // 查找休息班次类型
+        const restShift = this.shiftTypes.find(s => s.value === 'rest')
+        if (!restShift) {
+          console.warn('⚠️ 未找到休息班次类型，无法自动排休息')
+          return
+        }
+        
+        // 为每个休息日创建排班
+        const schedulePromises = restDays.map(async (dateStr) => {
+          // 对于跨周的日期，需要先加载该周的排班数据来检查是否已有排班
+          // 检查是否已有排班，如果有排班则跳过，不覆盖
+          const existingSchedules = this.getSchedulesForCell(nurseId, dateStr)
+          
+          // 如果当前周的排班数据中没有该日期，需要单独加载该周的排班数据检查
+          const targetDate = new Date(dateStr)
+          const targetWeekStart = this.getWeekStart(targetDate)
+          const targetWeekEnd = new Date(targetWeekStart)
+          targetWeekEnd.setDate(targetWeekEnd.getDate() + 6)
+          const targetWeekStartStr = this.formatDate(targetWeekStart)
+          const targetWeekEndStr = this.formatDate(targetWeekEnd)
+          
+          // 检查目标日期是否在当前周的排班数据范围内
+          const weekDateSet = new Set(this.weekDays.map(day => day.dateStr))
+          let hasExistingSchedule = existingSchedules.length > 0
+          
+          // 如果是跨周的日期，需要单独加载该周的排班数据检查
+          if (!weekDateSet.has(dateStr)) {
+            try {
+              const targetWeekResult = await getScheduleList({
+                departmentId: this.departmentId,
+                startDate: targetWeekStartStr,
+                endDate: targetWeekEndStr
+              })
+              
+              if (targetWeekResult && targetWeekResult.list) {
+                const targetSchedule = targetWeekResult.list.find(s => 
+                  s.nurseId === nurseId && s.date === dateStr
+                )
+                hasExistingSchedule = !!targetSchedule
+              }
+            } catch (error) {
+              console.warn(`检查跨周排班失败 (${dateStr}):`, error)
+            }
+          }
+          
+          if (hasExistingSchedule) {
+            console.log(`⏭️ 护士 ${this.getNurseName(nurseId)} 在 ${dateStr} 已有排班，跳过自动排休息`)
+            return { 
+              success: true, 
+              dateStr,
+              skipped: true,
+              reason: '已有排班'
+            }
+          }
+          
+          // 检查目标周的休息次数，如果已经有2个休息，超过的部分用调休
+          // 计算目标日期所在周的休息次数
+          let targetWeekRestCount = 0
+          let targetWeekSchedules = []
+          
+          // 如果是跨周的日期，需要加载该周的排班数据
+          if (!weekDateSet.has(dateStr)) {
+            try {
+              const targetWeekResult = await getScheduleList({
+                departmentId: this.departmentId,
+                startDate: targetWeekStartStr,
+                endDate: targetWeekEndStr
+              })
+              
+              if (targetWeekResult && targetWeekResult.list) {
+                targetWeekSchedules = targetWeekResult.list
+              }
+            } catch (error) {
+              console.warn(`加载目标周排班数据失败 (${dateStr}):`, error)
+            }
+          } else {
+            // 如果是当前周的日期，使用当前周的排班数据
+            targetWeekSchedules = this.schedules
+          }
+          
+          // 计算目标周该护士的休息次数（包括休息和调休）
+          const targetWeekDateSet = new Set()
+          const targetWeekStartDate = new Date(targetWeekStartStr)
+          for (let i = 0; i < 7; i++) {
+            const date = new Date(targetWeekStartDate)
+            date.setDate(targetWeekStartDate.getDate() + i)
+            targetWeekDateSet.add(this.formatDate(date))
+          }
+          
+          targetWeekRestCount = targetWeekSchedules.filter(schedule => {
+            const scheduleDate = schedule.date
+            return targetWeekDateSet.has(scheduleDate) &&
+                   schedule.nurseId === nurseId &&
+                   (this.getScheduleShiftValue(schedule) === 'rest' || 
+                    this.getScheduleShiftValue(schedule) === 'compensatory')
+          }).length
+          
+          console.log(`📊 护士 ${this.getNurseName(nurseId)} 在目标周（${targetWeekStartStr} 至 ${targetWeekEndStr}）已有 ${targetWeekRestCount} 个休息/调休`)
+          
+          // 决定使用休息还是调休
+          const useRest = targetWeekRestCount < 2
+          const shiftTypeToUse = useRest ? 'rest' : 'compensatory'
+          const shiftNameToUse = useRest ? '休息' : '调休'
+          const shiftTypeForAPI = 'off_duty' // 休息和调休都使用 off_duty
+          
+          console.log(`📋 将使用: ${shiftNameToUse} (${shiftTypeToUse}), 因为目标周已有 ${targetWeekRestCount} 个休息/调休`)
+          
+          // 创建休息或调休排班
+          try {
+            console.log(`🔄 开始为护士 ${this.getNurseName(nurseId)} (${nurseId}) 在 ${dateStr} 创建${shiftNameToUse}排班`)
+            const result = await createSchedule({
+              nurseId,
+              departmentId: this.departmentId,
+              date: dateStr,
+              shiftType: shiftTypeForAPI,
+              shiftName: shiftNameToUse,
+              timeRange: '整班'
+            })
+            
+            if (result) {
+              const scheduleId = result.id || result._id
+              console.log(`✅ ${shiftNameToUse}排班创建成功: ID=${scheduleId}, 护士=${this.getNurseName(nurseId)}, 日期=${dateStr}`)
+              
+              // 只将当前周的排班添加到本地列表，跨周的排班不需要添加到本地列表
+              // 因为当前周的排班列表只显示当前周的数据
+              const weekDateSet = new Set(this.weekDays.map(day => day.dateStr))
+              if (weekDateSet.has(dateStr)) {
+                this.schedules.push({
+                  id: scheduleId,
+                  nurseId,
+                  nurseName: this.getNurseName(nurseId),
+                  date: dateStr,
+                  shiftType: 'off_duty',
+                  shiftName: shiftNameToUse,
+                  shiftValue: shiftTypeToUse,
+                  timeRange: result.timeRange || '整班',
+                  hours: result.hours !== undefined && result.hours !== null ? result.hours : undefined
+                })
+              } else {
+                console.log(`📅 跨周${shiftNameToUse}排班已创建（${dateStr}），不在当前周显示范围内`)
+              }
+              
+              return { success: true, dateStr, skipped: false, scheduleId, shiftType: shiftTypeToUse, shiftName: shiftNameToUse }
+            } else {
+              console.warn(`⚠️ 创建休息排班返回空结果: 护士=${this.getNurseName(nurseId)}, 日期=${dateStr}`)
+              return { success: false, dateStr, error: '后端返回空结果' }
+            }
+          } catch (error) {
+            console.error(`❌ 为护士 ${this.getNurseName(nurseId)} (${nurseId}) 在 ${dateStr} 创建休息排班失败:`, error)
+            console.error(`错误详情:`, {
+              message: error.message,
+              stack: error.stack,
+              response: error.response || error.data
+            })
+            return { success: false, dateStr, error: error.message || '未知错误' }
+          }
+        })
+        
+        // 等待所有排班创建完成
+        const results = await Promise.all(schedulePromises)
+        const successCount = results.filter(r => r.success && !r.skipped).length
+        const skippedCount = results.filter(r => r.skipped).length
+        const failCount = results.filter(r => !r.success).length
+        
+        if (failCount > 0) {
+          const failResults = results.filter(r => !r.success)
+          const failDates = failResults.map(r => r.dateStr).join('、')
+          const failErrors = failResults.map(r => `${r.dateStr}: ${r.error || '未知错误'}`).join('; ')
+          console.error(`❌ ${failCount} 天的自动排休息失败: ${failDates}`)
+          console.error(`失败详情:`, failErrors)
+          
+          // 显示错误提示，让用户知道有跨周休息排班创建失败
+          uni.showToast({
+            title: `${failCount}天休息排班失败`,
+            icon: 'none',
+            duration: 3000
+          })
+        }
+        
+        if (skippedCount > 0) {
+          const skippedResults = results.filter(r => r.skipped)
+          const skippedDates = skippedResults.map(r => `${r.dateStr}(${r.reason || '未知原因'})`).join('、')
+          console.log(`⏭️ ${skippedCount} 天已有排班或休息次数已达上限，已跳过: ${skippedDates}`)
+        }
+        
+        if (successCount > 0) {
+          const successResults = results.filter(r => r.success && !r.skipped)
+          const restCount = successResults.filter(r => r.shiftType === 'rest').length
+          const compensatoryCount = successResults.filter(r => r.shiftType === 'compensatory').length
+          const successDates = successResults.map(r => `${r.dateStr}(${r.shiftName || '休息'})`).join('、')
+          
+          console.log(`✅ 已为护士 ${this.getNurseName(nurseId)} 自动排 ${successCount} 天: ${restCount}天休息 + ${compensatoryCount}天调休`)
+          console.log(`   详情: ${successDates}`)
+          
+          // 如果成功创建了跨周的休息/调休排班，提示用户
+          const crossWeekResults = successResults.filter(r => {
+            const weekDateSet = new Set(this.weekDays.map(day => day.dateStr))
+            return !weekDateSet.has(r.dateStr)
+          })
+          
+          if (crossWeekResults.length > 0) {
+            const crossWeekDates = crossWeekResults.map(r => `${r.dateStr}(${r.shiftName || '休息'})`).join('、')
+            console.log(`📅 已创建跨周排班: ${crossWeekDates}`)
+            const crossWeekRestCount = crossWeekResults.filter(r => r.shiftType === 'rest').length
+            const crossWeekCompensatoryCount = crossWeekResults.filter(r => r.shiftType === 'compensatory').length
+            let toastMsg = `已为下周排${crossWeekResults.length}天`
+            if (crossWeekRestCount > 0 && crossWeekCompensatoryCount > 0) {
+              toastMsg = `已为下周排${crossWeekRestCount}天休息+${crossWeekCompensatoryCount}天调休`
+            } else if (crossWeekCompensatoryCount > 0) {
+              toastMsg = `已为下周排${crossWeekCompensatoryCount}天调休`
+            }
+            uni.showToast({
+              title: toastMsg,
+              icon: 'success',
+              duration: 2000
+            })
+          }
+        }
+      } catch (error) {
+        console.error('夜班后自动排休息功能出错:', error)
+        // 静默处理错误，不影响主流程
+      }
+    },
     // 显示自动排班弹窗
     openAutoScheduleModal() {
       console.log('打开自动排班弹窗')
@@ -1626,6 +1963,31 @@ export default {
             icon: 'none'
           })
           return
+        }
+        
+        // 1.5. 加载上周的排班数据，确保排班规则连续性
+        const lastWeekStart = new Date(this.currentWeekStart)
+        lastWeekStart.setDate(lastWeekStart.getDate() - 7)
+        const lastWeekEnd = new Date(lastWeekStart)
+        lastWeekEnd.setDate(lastWeekEnd.getDate() + 6)
+        const lastWeekStartStr = this.formatDate(lastWeekStart)
+        const lastWeekEndStr = this.formatDate(lastWeekEnd)
+        
+        console.log(`📅 加载上周排班数据：${lastWeekStartStr} 至 ${lastWeekEndStr}`)
+        let lastWeekSchedules = []
+        try {
+          const lastWeekResult = await getScheduleList({
+            departmentId: this.departmentId,
+            startDate: lastWeekStartStr,
+            endDate: lastWeekEndStr
+          })
+          if (lastWeekResult && lastWeekResult.list) {
+            lastWeekSchedules = lastWeekResult.list
+            console.log(`✅ 已加载上周排班数据，共 ${lastWeekSchedules.length} 个排班`)
+          }
+        } catch (error) {
+          console.warn('⚠️ 加载上周排班数据失败，将继续使用当前周数据:', error)
+          // 如果加载失败，继续执行，不影响主流程
         }
         
         // 2. 获取当前周的日期列表
@@ -1696,21 +2058,80 @@ export default {
           // 按工号排序，确保轮转顺序稳定
           const sortedLeaders = [...teamLeaders].sort((a, b) => a.id.localeCompare(b.id))
           
+          // 根据上周的排班数据，计算本周应该从哪个位置开始
+          // 查找上周最后一天的组长夜班排班，确定轮转的起始位置
+          let startOffset = 0
+          if (lastWeekSchedules.length > 0) {
+            // 获取上周最后一天的组长夜班排班
+            const lastWeekLastDay = lastWeekEndStr
+            const lastWeekLastNight = lastWeekSchedules.find(s => 
+              s.date === lastWeekLastDay && 
+              (s.shiftType === 'night_leader' || s.shiftType === 'night_nurse')
+            )
+            
+            if (lastWeekLastNight) {
+              // 找到上周最后一个上夜班的组长在排序列表中的位置
+              const lastLeaderIndex = sortedLeaders.findIndex(l => l.id === lastWeekLastNight.nurseId)
+              if (lastLeaderIndex >= 0) {
+                // 本周应该从下一个组长开始轮转
+                startOffset = (lastLeaderIndex + 1) % sortedLeaders.length
+                console.log(`📊 根据上周排班，组长夜班轮转从索引 ${startOffset} 开始（${sortedLeaders[startOffset].name}）`)
+              }
+            }
+          }
+          
           weekDays.forEach((dateStr, dayIndex) => {
-            // 计算当前是第几轮的第几天（0-5，第6天是周日）
-            const cycleDay = dayIndex % leaderCycle
+            // 计算应该上夜班的组长索引
+            // 基于上周的排班位置，继续轮转
+            let leaderIndex = (startOffset + dayIndex) % sortedLeaders.length
+            let selectedLeader = sortedLeaders[leaderIndex]
             
-            // 计算当前是第几轮（从0开始）
-            const cycleNumber = Math.floor(dayIndex / leaderCycle)
+            // 检查该组长在前1-2天是否有夜班（如果有，不应该再排夜班）
+            const scheduleDate = new Date(dateStr)
+            const checkDates = []
+            for (let i = 1; i <= 2; i++) {
+              const checkDate = new Date(scheduleDate)
+              checkDate.setDate(scheduleDate.getDate() - i)
+              checkDates.push(this.formatDate(checkDate))
+            }
             
-            // 每6天一个周期，周期内6个组长上夜班
-            // 计算应该上夜班的组长索引（8个组长中选6个，轮转）
-            // 使用模运算确保在8个组长中循环
-            const baseIndex = (cycleNumber * activeLeadersPerCycle + cycleDay) % sortedLeaders.length
-            const leader = sortedLeaders[baseIndex]
+            // 检查上周和本周的排班数据中，该组长在前1-2天是否有夜班
+            let hasRecentNightShift = [...lastWeekSchedules, ...this.schedules].some(schedule => {
+              const scheduleShiftValue = this.getScheduleShiftValue(schedule)
+              return schedule.nurseId === selectedLeader.id &&
+                     checkDates.includes(schedule.date) &&
+                     (scheduleShiftValue === 'night_nurse' || scheduleShiftValue === 'night_leader')
+            })
+            
+            // 如果前1-2天有夜班，尝试选择其他组长
+            if (hasRecentNightShift) {
+              console.log(`⏭️ 组长 ${selectedLeader.name} 在前1-2天已有夜班，尝试选择其他组长`)
+              
+              let attempts = 0
+              while (hasRecentNightShift && attempts < sortedLeaders.length) {
+                // 尝试下一个组长
+                leaderIndex = (leaderIndex + 1) % sortedLeaders.length
+                selectedLeader = sortedLeaders[leaderIndex]
+                attempts++
+                
+                // 检查新选择的组长前1-2天是否有夜班
+                hasRecentNightShift = [...lastWeekSchedules, ...this.schedules].some(schedule => {
+                  const scheduleShiftValue = this.getScheduleShiftValue(schedule)
+                  return schedule.nurseId === selectedLeader.id &&
+                         checkDates.includes(schedule.date) &&
+                         (scheduleShiftValue === 'night_nurse' || scheduleShiftValue === 'night_leader')
+                })
+              }
+              
+              if (!hasRecentNightShift) {
+                console.log(`✅ 选择组长 ${selectedLeader.name} 替代`)
+              } else {
+                console.warn(`⚠️ 所有组长前1-2天都有夜班，仍然排原组长 ${selectedLeader.name}`)
+              }
+            }
             
             newSchedules.push({
-              nurseId: leader.id,
+              nurseId: selectedLeader.id,
               departmentId: this.departmentId,
               date: dateStr,
               shiftType: 'night_leader',
@@ -1725,11 +2146,53 @@ export default {
           const nightCycle = 6 // 6天一个夜班
           const sortedNurses = [...n2n3Nurses].sort((a, b) => a.id.localeCompare(b.id))
           
+          // 根据上周的排班数据，计算每个护士在本周应该从哪一天开始排班
           sortedNurses.forEach((nurse, nurseIndex) => {
-            // 计算该护士应该上夜班的日子
-            const baseDay = nurseIndex % nightCycle
+            // 查找该护士上周最后一次夜班的日期
+            const lastWeekNights = lastWeekSchedules.filter(s => 
+              s.nurseId === nurse.id && 
+              (s.shiftType === 'night_nurse' || s.shiftType === 'night_leader')
+            ).sort((a, b) => b.date.localeCompare(a.date))
+            
+            let baseDay = nurseIndex % nightCycle
+            
+            if (lastWeekNights.length > 0) {
+              // 找到该护士上周最后一次夜班的日期
+              const lastNightDate = lastWeekNights[0].date
+              
+              // 计算从上周最后一次夜班到本周第一天之间过了多少天
+              const daysSinceLastNight = Math.floor((new Date(weekDays[0]) - new Date(lastNightDate)) / (1000 * 60 * 60 * 24))
+              
+              // 根据夜班周期（6天），计算本周应该从第几天开始排班
+              baseDay = (daysSinceLastNight - 1 + nightCycle) % nightCycle
+              
+              console.log(`📊 护士 ${nurse.name} 上次夜班：${lastNightDate}，距本周第一天 ${daysSinceLastNight} 天，本周从第 ${baseDay} 天开始排夜班`)
+            }
+            
             weekDays.forEach((dateStr, dayIndex) => {
               if (dayIndex % nightCycle === baseDay) {
+                // 检查该护士在前1-2天是否有夜班（如果有，不应该再排夜班）
+                const scheduleDate = new Date(dateStr)
+                const checkDates = []
+                for (let i = 1; i <= 2; i++) {
+                  const checkDate = new Date(scheduleDate)
+                  checkDate.setDate(scheduleDate.getDate() - i)
+                  checkDates.push(this.formatDate(checkDate))
+                }
+                
+                // 检查上周和本周的排班数据中，该护士在前1-2天是否有夜班
+                const hasRecentNightShift = [...lastWeekSchedules, ...this.schedules].some(schedule => {
+                  const scheduleShiftValue = this.getScheduleShiftValue(schedule)
+                  return schedule.nurseId === nurse.id &&
+                         checkDates.includes(schedule.date) &&
+                         (scheduleShiftValue === 'night_nurse' || scheduleShiftValue === 'night_leader')
+                })
+                
+                if (hasRecentNightShift) {
+                  console.log(`⏭️ 护士 ${nurse.name} 在前1-2天已有夜班，跳过 ${dateStr} 的夜班排班`)
+                  return // 跳过该日期，不排夜班
+                }
+                
                 newSchedules.push({
                   nurseId: nurse.id,
                   departmentId: this.departmentId,
@@ -1748,11 +2211,53 @@ export default {
           const nightCycle = 5 // 5天一个夜班
           const sortedNurses = [...n1n0Nurses].sort((a, b) => a.id.localeCompare(b.id))
           
+          // 根据上周的排班数据，计算每个护士在本周应该从哪一天开始排班
           sortedNurses.forEach((nurse, nurseIndex) => {
-            // 计算该护士应该上夜班的日子
-            const baseDay = nurseIndex % nightCycle
+            // 查找该护士上周最后一次夜班的日期
+            const lastWeekNights = lastWeekSchedules.filter(s => 
+              s.nurseId === nurse.id && 
+              (s.shiftType === 'night_nurse' || s.shiftType === 'night_leader')
+            ).sort((a, b) => b.date.localeCompare(a.date))
+            
+            let baseDay = nurseIndex % nightCycle
+            
+            if (lastWeekNights.length > 0) {
+              // 找到该护士上周最后一次夜班的日期
+              const lastNightDate = lastWeekNights[0].date
+              
+              // 计算从上周最后一次夜班到本周第一天之间过了多少天
+              const daysSinceLastNight = Math.floor((new Date(weekDays[0]) - new Date(lastNightDate)) / (1000 * 60 * 60 * 24))
+              
+              // 根据夜班周期（5天），计算本周应该从第几天开始排班
+              baseDay = (daysSinceLastNight - 1 + nightCycle) % nightCycle
+              
+              console.log(`📊 护士 ${nurse.name} 上次夜班：${lastNightDate}，距本周第一天 ${daysSinceLastNight} 天，本周从第 ${baseDay} 天开始排夜班`)
+            }
+            
             weekDays.forEach((dateStr, dayIndex) => {
               if (dayIndex % nightCycle === baseDay) {
+                // 检查该护士在前1-2天是否有夜班（如果有，不应该再排夜班）
+                const scheduleDate = new Date(dateStr)
+                const checkDates = []
+                for (let i = 1; i <= 2; i++) {
+                  const checkDate = new Date(scheduleDate)
+                  checkDate.setDate(scheduleDate.getDate() - i)
+                  checkDates.push(this.formatDate(checkDate))
+                }
+                
+                // 检查上周和本周的排班数据中，该护士在前1-2天是否有夜班
+                const hasRecentNightShift = [...lastWeekSchedules, ...this.schedules].some(schedule => {
+                  const scheduleShiftValue = this.getScheduleShiftValue(schedule)
+                  return schedule.nurseId === nurse.id &&
+                         checkDates.includes(schedule.date) &&
+                         (scheduleShiftValue === 'night_nurse' || scheduleShiftValue === 'night_leader')
+                })
+                
+                if (hasRecentNightShift) {
+                  console.log(`⏭️ 护士 ${nurse.name} 在前1-2天已有夜班，跳过 ${dateStr} 的夜班排班`)
+                  return // 跳过该日期，不排夜班
+                }
+                
                 newSchedules.push({
                   nurseId: nurse.id,
                   departmentId: this.departmentId,
@@ -1781,14 +2286,46 @@ export default {
             
             console.log('📦 批量创建排班响应:', result)
             
-            if (result && result.list && result.list.length > 0) {
-              console.log(`✅ 成功创建 ${result.list.length} 个排班`)
+            // 检查批量创建是否成功（支持两种返回格式：list 或 successCount）
+            const successCount = result?.successCount || (result?.list?.length || 0)
+            const hasList = result?.list && result.list.length > 0
+            
+            if (result && (hasList || successCount > 0)) {
+              console.log(`✅ 成功创建 ${successCount} 个排班`)
               
               // 8. 重新加载排班数据
               await this.loadSchedules()
               
+              // 9. 为每个夜班排班自动创建后面两天的休息排班
+              // 从新创建的排班中筛选夜班（使用原始 newSchedules 数组，因为后端可能不返回完整列表）
+              const nightSchedules = newSchedules.filter(s => 
+                s.shiftType === 'night_nurse' || s.shiftType === 'night_leader'
+              )
+              
+              if (nightSchedules.length > 0) {
+                console.log(`🌙 发现 ${nightSchedules.length} 个夜班排班，开始自动排休息/调休`)
+                console.log(`📋 夜班排班列表:`, nightSchedules.map(s => ({
+                  nurseId: s.nurseId,
+                  date: s.date,
+                  shiftType: s.shiftType
+                })))
+                
+                // 为每个夜班排班创建休息/调休排班
+                const restPromises = nightSchedules.map(async (schedule) => {
+                  const nurse = this.nurses.find(n => n.id === schedule.nurseId)
+                  const nurseName = nurse ? nurse.name : '未知'
+                  console.log(`🔄 开始为夜班排班创建休息/调休: 护士=${nurseName}(${schedule.nurseId}), 日期=${schedule.date}`)
+                  return await this.autoScheduleRestAfterNightShift(schedule.nurseId, schedule.date)
+                })
+                
+                await Promise.all(restPromises)
+                console.log(`✅ 夜班后自动排休息/调休处理完成`)
+              } else {
+                console.warn(`⚠️ 未发现任何夜班排班，跳过自动排休息/调休`)
+              }
+              
               uni.showToast({
-                title: `自动排班完成，共生成 ${result.list.length} 个夜班`,
+                title: `自动排班完成，共生成 ${successCount} 个夜班`,
                 icon: 'success',
                 duration: 3000
               })
